@@ -1,0 +1,254 @@
+services:
+  db:
+    image: postgres:16-alpine
+    container_name: chat_db
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: damian
+      POSTGRES_PASSWORD: root_password
+      POSTGRES_DB: ai_chat
+    ports:
+      - "5432:5432"
+    volumes:
+      - pg_data:/var/lib/postgresql/data
+      - ./init.sql:/docker-entrypoint-initdb.d/init.sql
+
+  # Servidor de inferencia compartido (llama-server, binario standalone de
+  # llama.cpp). Carga Qwen3.6-35B-A3B una sola vez y lo expone vía API
+  # OpenAI-compatible en :8080. Tanto el chat (app) como OpenHands le
+  # hablan a este mismo servidor, así el modelo no se duplica en VRAM.
+  llm_server:
+    build: ./llm_server
+    container_name: llm_server
+    restart: unless-stopped
+    ports:
+      - "8080:8080"
+    environment:
+      LLAMA_CTX_SIZE: &ctx_size 262144
+    volumes:
+      - ~/ai_models:/models
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+
+  # Variante "uncensored" (abliterada) del mismo modelo — misma
+  # arquitectura MoE liviana en VRAM, contexto reducido a propósito
+  # (65536 en vez de 262144) para poder convivir con llm_server en la
+  # misma GPU de 16GB si hace falta. NUNCA se corrió simultáneamente con
+  # llm_server_qwen27b (denso) sin medir VRAM real primero.
+  llm_server_uncensored:
+    build: ./llm_server_uncensored
+    container_name: llm_server_uncensored
+    restart: unless-stopped
+    ports:
+      - "8081:8080"
+    environment:
+      LLAMA_CTX_SIZE_UNCENSORED: 65536
+    volumes:
+      - ~/ai_models:/models
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+
+  # Qwen3.6-27B: DENSO (no MoE, --cpu-moe no aplica), arquitectura
+  # híbrida Gated DeltaNet + atención completa. Benchmarks oficiales de
+  # Qwen lo dan mejor que llm_server (35B-A3B) en TODOS los benchmarks de
+  # coding — el trade-off es que se come la VROM él solo (no hay
+  # expertos que dejar en RAM), así que probablemente no convive bien en
+  # simultáneo con las otras dos instancias en tus 16GB. Contexto
+  # arranca en 32768 (recomendación oficial para uso local), no en
+  # 262144 — subir gradualmente si el margen real de VRAM lo permite.
+  llm_server_qwen27b:
+    build: ./llm_server_qwen27b
+    container_name: llm_server_qwen27b
+    restart: unless-stopped
+    ports:
+      - "8082:8080"
+    environment:
+      LLAMA_CTX_SIZE_27B: ${LLAMA_CTX_SIZE_27B:-49152}
+    volumes:
+      - ~/ai_models:/models
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+
+  app:
+    build: ./backend
+    container_name: airllm_app
+    restart: unless-stopped
+    ports:
+      - "8501:8501"
+    environment:
+      DB_HOST: db
+      DB_USER: damian
+      DB_PASSWORD: root_password
+      DB_NAME: ai_chat
+      LLM_SERVER_URL: http://llm_server:8080/v1
+      # Mismo valor que llm_server (ver ancla &ctx_size arriba): la app lo
+      # necesita para saber cuándo empezar a recortar historial antes de
+      # pegar contra el límite real del servidor de inferencia.
+      LLAMA_CTX_SIZE: *ctx_size
+    volumes:
+      - ./backend:/app
+    depends_on:
+      - db
+      - llm_server
+
+  # Imagen custom del sandbox de OpenHands con .NET SDK 8.0 + Godot 4.7 mono.
+  # Este servicio solo existe para buildear la imagen — no corre como
+  # contenedor en sí mismo. OpenHands la usa vía SANDBOX_BASE_CONTAINER_IMAGE.
+  godot_sandbox:
+    build: ./godot-sandbox
+    image: openhands-godot-sandbox:latest
+    command: ["echo", "imagen lista"]
+
+  # OpenHands: agente de coding autónomo. Se conecta al mismo llm_server.
+  # Necesita el socket de Docker para poder levantar su propia sandbox
+  # (donde ejecuta comandos/edita archivos de forma aislada), y un único
+  # directorio del host montado como espacio de trabajo persistente.
+  #
+  # NOTA sobre la imagen/variables: OpenHands renombró su organización de
+  # GitHub (All-Hands-AI -> OpenHands) y migró de arquitectura (V0 -> V1).
+  # Esto cambió: el dominio de la imagen (docker.openhands.dev, no
+  # docker.all-hands.dev), las env vars del sandbox (AGENT_SERVER_IMAGE_*
+  # en vez de SANDBOX_RUNTIME_CONTAINER_IMAGE) y la ruta del volumen de
+  # estado (/.openhands, no /.openhands-state).
+  #
+  # IMPORTANTE - bug conocido de red (issue OpenHands#12229, sin fix al
+  # momento de escribir esto): el sandbox real donde corre el agente
+  # (contenedor oh-agent-server-*) NO lo crea Docker Compose, sino el
+  # propio "openhands" vía Docker-in-Docker usando el socket montado
+  # abajo. Ese sandbox queda en una red Docker aparte, fuera de la red
+  # default de este compose, así que el DNS interno de Compose (que
+  # resolvería "llm_server" al nombre del servicio) NO funciona ahí
+  # adentro. El extra_hosts de ESTE servicio tampoco se propaga al
+  # sandbox (es justamente el bug reportado: el código de OpenHands no
+  # pasa extra_hosts al crear el contenedor del sandbox).
+  #
+  # SOLUCIÓN: en la UI de OpenHands (Settings -> LLM -> Advanced), el
+  # Base URL debe ser http://host.docker.internal:8080/v1 (apuntando al
+  # puerto publicado de llm_server en el host), NO http://llm_server:8080/v1.
+  # host.docker.internal sí resuelve desde el sandbox porque sale por el
+  # bridge default de Docker hacia el host, a diferencia del nombre de
+  # servicio de Compose.
+  openhands:
+    image: docker.openhands.dev/openhands/openhands:1.8
+    container_name: openhands
+    restart: unless-stopped
+    pull_policy: always
+    stdin_open: true
+    tty: true
+    ports:
+      - "3000:3000"
+    extra_hosts:
+      # En Linux, a diferencia de Docker Desktop (Mac/Windows),
+      # host.docker.internal no se resuelve automáticamente.
+      - "host.docker.internal:host-gateway"
+    environment:
+      # Imagen custom del sandbox con .NET SDK 8.0 + Godot 4.7 mono.
+      # SANDBOX_BASE_CONTAINER_IMAGE reemplaza a AGENT_SERVER_IMAGE_* cuando
+      # querés usar una imagen propia en vez de la oficial de OpenHands.
+      # La imagen debe estar buildeada localmente antes de levantar openhands
+      # (docker compose build godot_sandbox).
+      - SANDBOX_BASE_CONTAINER_IMAGE=openhands-godot-sandbox:latest
+      - LOG_ALL_EVENTS=true
+      # LiteLLM (la capa que usa OpenHands para hablarle a cualquier
+      # proveedor) exige que exista esta env var cuando el modelo usa el
+      # prefijo "openai/", sin importar que el endpoint real sea local y
+      # no valide la key. El campo "API Key" del formulario de la UI no
+      # parece propagarse correctamente a esta variable, así que la
+      # seteamos directo acá como fallback confiable.
+      - OPENAI_API_KEY=no-key
+      # CRÍTICO en V1: /opt/workspace_base (montado abajo en volumes) solo
+      # llega al contenedor "openhands" (el orquestador). El sandbox real
+      # donde el agente ejecuta código (oh-agent-server-*, ver nota de
+      # arriba) tiene su propio filesystem aislado, montado en /workspace
+      # dentro de ESE contenedor. SANDBOX_VOLUMES es el mecanismo V1 para
+      # propagar un mount del host hasta ahí (formato host_path:container_
+      # path[:mode]). Sin esto, el agente escribe en /workspace/project
+      # del sandbox y los archivos nunca aparecen en el host porque ese
+      # directorio no está conectado a ningún volumen persistente.
+      - SANDBOX_VOLUMES=/home/damian/openhands_workspace:/workspace:rw
+      # El proceso dentro del sandbox necesita correr con el mismo UID
+      # que es dueño de ~/openhands_workspace en el host (1000 = damian,
+      # confirmado con `id -u`), o no va a poder escribir ahí. Sin esto,
+      # el sandbox corre como otro UID y choca con permisos de archivos
+      # ya creados por un intento previo (p.ej. el subdirectorio
+      # "project" quedó root:root de cuando SANDBOX_VOLUMES todavía no
+      # estaba seteado y el sandbox escribía como root en su propio
+      # filesystem efímero, no en el mount real).
+      - SANDBOX_USER_ID=1000
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+      - ~/openhands_workspace:/opt/workspace_base
+      - ~/.openhands:/.openhands
+    depends_on:
+      - llm_server
+      - godot_sandbox
+
+  # Qwen Code: CLI agent oficial del equipo Qwen, optimizado específicamente
+  # para el formato de tool-calling/razonamiento de los modelos Qwen (a
+  # diferencia de OpenHands, que es genérico). No es un server — es una TUI
+  # interactiva, así que este contenedor no expone puerto: se queda vivo
+  # con `tail -f /dev/null` y entrás con `docker exec -it qwen_code qwen`.
+  #
+  # A diferencia de OpenHands, este SÍ corre como contenedor normal de
+  # Compose (no lanza un sandbox aparte vía Docker-in-Docker), así que el
+  # DNS interno de Compose funciona sin problema: le habla a "llm_server"
+  # directo, sin necesidad de host.docker.internal.
+  #
+  # user: node -> mismo criterio que SANDBOX_USER_ID=1000 en openhands:
+  # la imagen node:22-slim ya trae un usuario "node" (uid 1000), que
+  # coincide con el dueño real de ~/repos en el host — evita que los
+  # archivos que edite el agente queden con permisos de root.
+  qwen_code:
+    build: ./qwen_code
+    container_name: qwen_code
+    restart: unless-stopped
+    user: node
+    environment:
+      LLM_SERVER_URL: http://llm_server:8080/v1
+      MODEL_ALIAS: qwen3.6-local
+      # Mismo valor que llm_server (ver ancla &ctx_size arriba).
+      QWEN_CTX_SIZE: *ctx_size
+      HOME: /home/node
+    volumes:
+      # Ajustá esta ruta si tus repos viven en otro lado — es el mismo
+      # patrón que ~/openhands_workspace de OpenHands, pero para Qwen Code.
+      - ~/repos:/workspace
+      # Persiste ~/.qwen/settings.json entre recreaciones del contenedor,
+      # para no tener que regenerar la config cada vez.
+      - qwen_code_config:/home/node/.qwen
+      # Tu clave SSH del host, montada solo-lectura — el agente no tiene
+      # motivo para escribir ahí. Mismo UID (node=1000, coincide con tu
+      # usuario en el host) así que los permisos estrictos que exige SSH
+      # (600 en la privada, 700 en el directorio) se preservan tal cual
+      # sin necesidad de chown.
+      - ~/.ssh:/home/node/.ssh:ro
+      # Claude Code: credenciales OAuth. Read-write (no :ro) porque el
+      # token se refresca solo en background y necesita poder reescribir
+      # el archivo — a diferencia de la clave SSH, que nunca cambia.
+      - ~/.claude:/home/node/.claude
+      - ~/.claude.json:/home/node/.claude.json
+      # Antigravity CLI: mejor esfuerzo para reusar sesión (ver caveat
+      # sobre keyring en el Dockerfile). Read-write por el mismo motivo
+      # que Claude Code.
+      - ~/.gemini:/home/node/.gemini
+    depends_on:
+      - llm_server
+
+volumes:
+  pg_data:
+  qwen_code_config:

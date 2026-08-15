@@ -1,0 +1,47 @@
+# === Python ===
+__pycache__/
+*.py[cod]
+*.egg-info/
+dist/
+build/
+.eggs/
+
+# === Docker volumes / host-mounted data ===
+pg_data/
+openhands_workspace/
+ai_models/
+
+# === Runtime output & logs ===
+mnt/user-data/outputs/
+test.txt
+
+# === Backup copies ===
+backup/
+
+# === Original / backup config files ===
+*.ori
+
+# === Archives (generated from source) ===
+*.tgz
+*.tar.gz
+*.zip
+
+# === Secrets & credentials (never commit) ===
+.env
+*.pem
+*.key
+.ssh/
+
+# === OS junk ===
+.DS_Store
+Thumbs.db
+
+# === IDE / editor ===
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# === Temp ===
+*~
+.tmp
