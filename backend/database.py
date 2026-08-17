@@ -134,7 +134,7 @@ def save_backend_settings(backend_key, system_prompt, temperature, max_tokens, r
     cursor.close()
     conn.close()
 
-def ensure_attachments_table():
+def ensure_tables():
     """CREATE TABLE IF NOT EXISTS: se puede llamar siempre al arrancar la
     app sin miedo a romper una base ya existente (a diferencia de tocar
     init.sql, que solo corre la primera vez que se crea el volumen de
@@ -142,6 +142,27 @@ def ensure_attachments_table():
     conn = get_db_connection()
     cursor = conn.cursor()
     cursor.execute("""
+        CREATE EXTENSION IF NOT EXISTS "uuid-ossp";
+
+        CREATE TABLE IF NOT EXISTS conversations (
+            id UUID PRIMARY KEY,
+            title VARCHAR(255) NOT NULL,
+            created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
+        );
+
+        CREATE TABLE IF NOT EXISTS messages (
+            id SERIAL PRIMARY KEY,
+            conversation_id UUID REFERENCES conversations(id) ON DELETE CASCADE,
+            role VARCHAR(50) NOT NULL,
+            content TEXT NOT NULL,
+            created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
+        );
+
+        CREATE TABLE IF NOT EXISTS settings (
+            key VARCHAR(100) PRIMARY KEY,
+            value TEXT NOT NULL
+        );
+
         CREATE TABLE IF NOT EXISTS attachments (
             id SERIAL PRIMARY KEY,
             conversation_id UUID NOT NULL REFERENCES conversations(id) ON DELETE CASCADE,

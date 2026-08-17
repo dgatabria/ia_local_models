@@ -83,6 +83,29 @@ services:
             - driver: nvidia
               count: all
               capabilities: [gpu]
+  # Qwen3.8-27B experimental: modelo denso UD-Q3_K_XL, solo texto, sin
+  # MTP y con KV Q8. Los 65536 tokens son el primer escalón conservador
+  # para la RTX 4090 Laptop de 16GB. El profile evita que `docker compose
+  # up` intente cargarlo junto con los otros servidores y provoque OOM.
+  # Antes de probarlo, detener los demás llm_server que estén usando GPU.
+  llm_server_qwen38_27b:
+    profiles: ["qwen38"]
+    build: ./llm_server_qwen3.8_27b
+    container_name: llm_server_qwen38_27b
+    restart: unless-stopped
+    ports:
+      - "8083:8080"
+    environment:
+      LLAMA_CTX_SIZE_QWEN38_27B: ${LLAMA_CTX_SIZE_QWEN38_27B:-81920}
+    volumes:
+      - ~/ai_models:/models
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
 
   app:
     build: ./backend

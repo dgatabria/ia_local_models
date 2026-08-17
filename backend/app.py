@@ -17,7 +17,7 @@ import database as db
 
 st.set_page_config(page_title="Qwen Chat", layout="wide")
 
-db.ensure_attachments_table()
+db.ensure_tables()
 
 # Cuántas páginas de un PDF se rasterizan como imagen (además de extraerle
 # el texto completo, que no tiene este límite). Cada página-imagen consume
@@ -238,9 +238,9 @@ ATTACHMENT_TOOLS = [
 # nombre de servicio de cada contenedor en la red interna de Docker.
 BACKENDS = {
     "standard": {
-        "label": "Qwen3.6 (estándar)",
-        "base_url": os.environ.get("LLM_SERVER_URL", "http://llm_server:8080/v1"),
-        "model": "qwen3.6-35b-a3b",
+        "label": "Qwen3.8 (estándar)",
+        "base_url": os.environ.get("LLM_SERVER_URL_QWEN38", "http://llm_server_qwen38_27b:8080/v1"),
+        "model": "qwen3.8-27b",
     },
     "uncensored": {
         "label": "Qwen3.6 Uncensored",
@@ -554,7 +554,7 @@ if st.session_state.current_conv:
                 active_tools += INTERNET_TOOLS
 
             if active_tools:
-                MAX_TOOL_ROUNDS = 400  # tope de seguridad ante un modelo que insista en pedir tools en loop
+                MAX_TOOL_ROUNDS = 4  # tope de seguridad ante un modelo que insista en pedir tools en loop
                 for _ in range(MAX_TOOL_ROUNDS):
                     preflight = llm.chat.completions.create(
                         model=model_name,
