@@ -104,6 +104,16 @@ ENV IS_SANDBOX=1
 # sin que nada esté roto. 0 = sin límite.
 ENV QWEN_STREAM_IDLE_TIMEOUT_MS=0
 
+# Distinto del anterior: este corta el stream a los 900s de vida TOTAL,
+# aunque sigan llegando chunks activamente (no es un problema de
+# inactividad, es un tope duro de duracion). Con reasoning_level alto +
+# tareas largas en el 27B, es facil pegar contra esto con el modelo
+# generando de forma sana. 0 = sin limite. Mismo trade-off que con el
+# idle timeout: si algun dia hay un loop de razonamiento real, el
+# cliente tampoco va a cortar solo -- dependemos de --repeat-penalty en
+# el server para evitar que eso pase, no de este timeout.
+ENV QWEN_STREAM_MAX_LIFETIME_MS=0
+
 # --- .NET 8 SDK ---
 # NOTA sobre libicu72: es la versión de ICU (globalización/culturas) que
 # trae Debian 12 "bookworm" (base de node:22-slim). Si al buildear esto en

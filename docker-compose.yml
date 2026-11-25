@@ -2,7 +2,7 @@ services:
   db:
     image: postgres:16-alpine
     container_name: chat_db
-    restart: unless-stopped
+    restart: "no"
     environment:
       POSTGRES_USER: damian
       POSTGRES_PASSWORD: root_password
@@ -20,7 +20,7 @@ services:
   llm_server:
     build: ./llm_server
     container_name: llm_server
-    restart: unless-stopped
+    restart: "no"
     ports:
       - "8080:8080"
     environment:
@@ -36,18 +36,18 @@ services:
               capabilities: [gpu]
 
   # Variante "uncensored" (abliterada) del mismo modelo — misma
-  # arquitectura MoE liviana en VRAM, contexto reducido a propósito
-  # (65536 en vez de 262144) para poder convivir con llm_server en la
-  # misma GPU de 16GB si hace falta. NUNCA se corrió simultáneamente con
+  # arquitectura MoE liviana en VRAM. Contexto en 262144 = nativo (antes 65536,
+  # luego 151072): con este tamaño ya no conviene que conviva con
+  # llm_server en la misma GPU de 16GB sin medir VRAM. NUNCA se corrió simultáneamente con
   # llm_server_qwen27b (denso) sin medir VRAM real primero.
   llm_server_uncensored:
     build: ./llm_server_uncensored
     container_name: llm_server_uncensored
-    restart: unless-stopped
+    restart: "no"
     ports:
       - "8081:8080"
     environment:
-      LLAMA_CTX_SIZE_UNCENSORED: 65536
+      LLAMA_CTX_SIZE_UNCENSORED: 262144
     volumes:
       - ~/ai_models:/models
     deploy:
@@ -69,7 +69,7 @@ services:
   llm_server_qwen27b:
     build: ./llm_server_qwen27b
     container_name: llm_server_qwen27b
-    restart: unless-stopped
+    restart: "no"
     ports:
       - "8082:8080"
     environment:
@@ -92,11 +92,108 @@ services:
     profiles: ["qwen38"]
     build: ./llm_server_qwen3.8_27b
     container_name: llm_server_qwen38_27b
-    restart: unless-stopped
+    restart: "no"
     ports:
       - "8083:8080"
     environment:
       LLAMA_CTX_SIZE_QWEN38_27B: ${LLAMA_CTX_SIZE_QWEN38_27B:-81920}
+    volumes:
+      - ~/ai_models:/models
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+
+  # Qwen3.8-Flash-Next-GSQ-RCO-Coder (MoE 80B-A3B, cuantización IQ1_M)
+  # servido con Strata (https://github.com/Niko1221/Strata) sobre CUDA 13.
+  # En este host (RTX 4090 Laptop 16GB VRAM + 30.5 GiB RAM), Strata opera
+  # en modo low_ram_resident (--resident-experts): mantiene ~10 GB de
+  # expertos calientes + atención + MTP en VRAM y fija el resto del pack
+  # de expertos (~13.4 GB) en RAM con mlock.
+  # Expone API OpenAI-compatible en :8084 -> :8080 sin API key (NO_API_KEY=1).
+  # El profile evita que `docker compose up` lo levante junto con otro
+  # llm_server que ya esté ocupando la GPU.
+  llm_server_qwen38_coder:
+    profiles: ["qwen38-coder"]
+    build: ./llm_server_qwen3.8-Flash-Next-GSQ-RCO-Coder
+    container_name: llm_server_qwen38_coder
+    restart: "no"
+    stop_grace_period: 2m
+    shm_size: 2gb
+    ulimits:
+      memlock: -1
+    ports:
+      - "8084:8080"
+    environment:
+      FAMILY: coder
+      MODEL: IQ1_M
+      MODEL_PATH: /models/Qwen3.8-Flash-Next-GSQ-RCO-Coder
+      # 1 único slot (PARALLEL=1) con 262144 tokens de contexto (KV=int8)
+      # para dejar ~8 GiB libres en la RTX 4090 de 16GB para MTP y expert-cache.
+      CONTEXT: ${STRATA_CTX_SIZE_CODER:-262144}
+      PARALLEL: ${STRATA_PARALLEL_CODER:-1}
+      KV: ${STRATA_KV_CODER:-int8}
+      # Visión con el encoder en CPU (mmproj-Qwen3.8-Flash-Next-BF16.gguf junto a
+      # los shards en MODEL_PATH): la VRAM queda para expertos, atención y MTP.
+      VISION: ${STRATA_VISION_CODER:-cpu}
+      TUNE: ${STRATA_TUNE_CODER:-skip}
+      NO_API_KEY: "1"
+      STRATA_ALLOWED_HOSTS: "*"
+    volumes:
+      - ~/ai_models:/models
+      - ~/ai_models/Qwen3.8-Flash-Next-GSQ-RCO-Coder/strata_data:/data
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+
+  # RavenX-CyberAgent-35B-v5.1-Q4_K_M: fine-tune MoE 35B-A3B (arquitectura
+  # qwen35moe) orientado a seguridad/pentesting/bug-hunting, servido con
+  # llama-server (llama.cpp). Usa --cpu-moe para offloadear expertos a RAM
+  # y mantener la atención en la RTX 4090 Laptop de 16GB, con contexto
+  # máximo nativo de 262144 tokens (256K) y KV cache en Q8.
+  # Expone API OpenAI-compatible en :8085 -> :8080.
+  llm_server_ravenx_35b:
+    profiles: ["ravenx"]
+    build: ./llm_server_RavenX-CyberAgent-35B-v5.1-Q4_K_M
+    container_name: llm_server_ravenx_35b
+    restart: "no"
+    ports:
+      - "8085:8080"
+    environment:
+      LLAMA_CTX_SIZE_RAVENX: ${LLAMA_CTX_SIZE_RAVENX:-262144}
+    volumes:
+      - ~/ai_models:/models
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+
+  # Qwen3.8-27B Heretic (ARA, KL 0.0085 vs. base): descensurado, denso,
+  # con visión (mmproj Q8_0, encoder en CPU por defecto; MMPROJ_GPU=1 lo
+  # pasa a GPU). Reemplaza a llm_server_uncensored para coding agéntico.
+  # Q3_K_M (13.3GB) + KV Q8 con 81920 tokens: mismo perfil de VRAM que
+  # llm_server_qwen38_27b, así que NO convive con otro llm_server en la GPU.
+  # Expone API OpenAI-compatible en :8086 -> :8080.
+  llm_server_qwen38_heretic:
+    profiles: ["qwen38-heretic"]
+    build: ./llm_server_qwen38_27b_heretic
+    container_name: llm_server_qwen38_heretic
+    restart: "no"
+    ports:
+      - "8086:8080"
+    environment:
+      LLAMA_CTX_SIZE_QWEN38_HERETIC: ${LLAMA_CTX_SIZE_QWEN38_HERETIC:-81920}
+      MMPROJ_GPU: ${MMPROJ_GPU_QWEN38_HERETIC:-0}
     volumes:
       - ~/ai_models:/models
     deploy:
@@ -155,7 +252,7 @@ services:
   app:
     build: ./backend
     container_name: airllm_app
-    restart: unless-stopped
+    restart: "no"
     ports:
       - "8501:8501"
     environment:
@@ -214,7 +311,7 @@ services:
   openhands:
     image: docker.openhands.dev/openhands/openhands:1.8
     container_name: openhands
-    restart: unless-stopped
+    restart: "no"
     pull_policy: always
     stdin_open: true
     tty: true
@@ -284,7 +381,7 @@ services:
   qwen_code:
     build: ./qwen_code
     container_name: qwen_code
-    restart: unless-stopped
+    restart: "no"
     user: node
     environment:
       LLM_SERVER_URL: http://llm_server:8080/v1
