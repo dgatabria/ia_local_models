@@ -107,6 +107,51 @@ services:
               count: all
               capabilities: [gpu]
 
+  # Inkling 2 Mini abliterated (orcarouter, Mix-16G): MoE 26.4B/3.4B activos,
+  # arquitectura inkling2_loop (capas 6-17 corren 3 pasadas), contexto nativo
+  # 1M. Servido con llama-server pineado a un master con soporte inkling2_loop.
+  # Los expertos de las capas NO loopeadas (0-5, 18-23: 6703 MiB) van a RAM para
+  # dejar VRAM a la KV q8 (~17 KiB/token) y al compute buffer, que en esta
+  # arquitectura escala con ubatch x contexto (~192 B por celda, aun con
+  # flash-attn). Medido: 237568 tokens con ubatch 64 -> 15336/15946 MiB de
+  # VRAM, prompt ~76 tok/s, generación ~32 tok/s. 327680 con ubatch 512 da
+  # OOM (pide 31.9 GB de compute). ubatch 128 -> ~170K, pp ~141 tok/s.
+  # Visión con el mmproj
+  # de ggml-org, encoder en CPU. Mismo perfil que el coder: 1 slot, KV int8,
+  # sin API key, profile propio y restart "no" (no arranca al bootear ni
+  # con `docker compose up`). NO convive con otro llm_server en la GPU.
+  # El GGUF (repo gated) se baja a mano; el contenedor no lo descarga.
+  # Expone API OpenAI-compatible en :8087 -> :8080.
+  llm_server_inkling2_mini:
+    profiles: ["inkling"]
+    build: ./llm_server_inkling2_mini_abliterated
+    container_name: llm_server_inkling2_mini
+    restart: "no"
+    ulimits:
+      memlock: -1
+    ports:
+      - "8087:8080"
+    environment:
+      INKLING_MODEL_PATH: ${INKLING_MODEL_PATH:-/models/inkling-2-mini-abliterated/Inkling-2-Mini-abliterated-Mix-16G.gguf}
+      LLAMA_CTX_SIZE_INKLING: ${LLAMA_CTX_SIZE_INKLING:-237568}
+      INKLING_VISION: ${INKLING_VISION:-cpu}
+      INKLING_FLASH_ATTN: ${INKLING_FLASH_ATTN:-on}
+      INKLING_N_PREDICT: ${INKLING_N_PREDICT:-32768}
+      INKLING_UBATCH: ${INKLING_UBATCH:-64}
+      # Vacío = default del entrypoint (capas 0-5 y 18-23). Nunca incluir 6-17.
+      INKLING_CPU_EXPERTS_REGEX: ${INKLING_CPU_EXPERTS_REGEX:-}
+      # Flags extra de llama-server (p.ej. "-lv 4" para ver el desglose de memoria).
+      INKLING_EXTRA_ARGS: ${INKLING_EXTRA_ARGS:-}
+    volumes:
+      - ~/ai_models:/models
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+
   app:
     build: ./backend
     container_name: airllm_app
